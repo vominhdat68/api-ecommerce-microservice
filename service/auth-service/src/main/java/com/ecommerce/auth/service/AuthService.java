@@ -13,17 +13,19 @@ import org.springframework.stereotype.Service;
 public class AuthService {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final OtpVerificationService otpSender;
 
     public void register(RegisterRequest request) {
-
         User user = new User();
-        user.setEmail(request.getEmail());
+        user.setUsername(request.getEmail());
         user.setPassword(passwordEncoder.encode(request.getPassword()));
         user.setEnabled(false);
         userRepository.save(user);
+        otpSender.sendOtp(request.getEmail());
     }
 
     public boolean existsByEmail(@Email(message = "Invalid email format") String email) {
-        return userRepository.existsByEmail(email);
+        return userRepository.existsByUsername(email);
     }
+
 }
