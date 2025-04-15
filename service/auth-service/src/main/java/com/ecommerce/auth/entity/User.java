@@ -19,7 +19,7 @@ public class User implements UserDetails {
     private Long id;
 
     @Column(unique = true)
-    private String email;
+    private String username;
 
     @Column(name = "password_hash", nullable = false)
     private String password;
@@ -34,7 +34,7 @@ public class User implements UserDetails {
 
     @Override
     public String getUsername() {
-        return email;
+        return username;
     }
 
 
