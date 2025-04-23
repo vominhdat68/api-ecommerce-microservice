@@ -2,16 +2,18 @@ package com.ecommerce.auth.service;
 
 import com.ecommerce.auth.cache.AuthCache;
 import com.ecommerce.auth.cache.metadata.RefreshTokenMetadata;
-import com.ecommerce.auth.dto.*;
-import com.ecommerce.auth.dto.reponse.TokenResponse;
+import com.ecommerce.auth.dto.request.LoginRequest;
+import com.ecommerce.auth.dto.request.RegisterRequest;
+import com.ecommerce.auth.dto.request.UserResponse;
+import com.ecommerce.auth.dto.response.TokenResponse;
 import com.ecommerce.auth.entity.User;
-import com.ecommerce.auth.enumMessage.RegisterStatus;
 import com.ecommerce.auth.exception.InvalidTokenException;
-import com.ecommerce.auth.security.JwtProvider;
+import com.ecommerce.auth.config.security.JwtProvider;
+import com.ecommerce.shared_libs.cache.Redis.OTPCache;
 import com.ecommerce.shared_libs.cache.Redis.RedisKeys;
-import jakarta.servlet.http.HttpServletRequest;
+import com.ecommerce.shared_libs.response.ApiResponse;
+import com.ecommerce.shared_libs.response.ResponseCode;
 import lombok.RequiredArgsConstructor;
-import org.springframework.dao.DataAccessException;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
@@ -21,39 +23,43 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
-import java.util.List;
 import java.util.UUID;
 
 
 @Service
 @RequiredArgsConstructor
 public class AuthService {
-    private final CustomUserDetailsService userDetailsService;
+    private final UserService userService;
     private final PasswordEncoder passwordEncoder;
-    private final OtpVerificationService otpSender;
     private final AuthenticationManager authenticationManager;
     private final JwtProvider jwtProvider;
     private final AuthCache authCache;
+    private final OTPCache otpCache;
     private static final int MAX_REFRESH_TOKENS = 5;
 
-    public RegisterResult register(RegisterRequest request) {
-        if(userDetailsService.existsByUsername(request.getUsername())){
-            return RegisterResult.builder().status(RegisterStatus.USERNAME_EXISTS).message("Username already exists").build();
+    public ApiResponse<?> register(RegisterRequest request) {
+        if(userService.existsByUsername(request.username())){
+            return ApiResponse.error(ResponseCode.REGISTER_USERNAME_EXISTS.getCode(),ResponseCode.REGISTER_USERNAME_EXISTS.getEnMessage());
+        }
+        if(userService.exitsByEmail(request.email())){
+            return ApiResponse.error(ResponseCode.REGISTER_EMAIL_EXISTS.getCode(),ResponseCode.REGISTER_EMAIL_EXISTS.getEnMessage());
         }
         User user = new User();
-        user.setUsername(request.getUsername());
-        user.setEmail(request.getEmail());
-        user.setPassword(passwordEncoder.encode(request.getPassword()));
+        user.setUsername(request.username());
+        user.setEmail(request.email());
+        user.setPassword(passwordEncoder.encode(request.password()));
         user.setEnabled(false);
-        userDetailsService.saveUser(user);
-        otpSender.sendOtp(request.getEmail());
-        return RegisterResult.builder().status(RegisterStatus.SUCCESS).message("Registration successful, please check your email for OTP").build();
+        userService.saveUser(user);
+        //cache email verify OTP
+        otpCache.cacheRegisteredEmail(request.email());
+
+    return ApiResponse.success(ResponseCode.REGISTER_SUCCESS.getEnMessage());
     }
 
 
-    public TokenResponse login(LoginRequest request, HttpServletRequest servletRequest) {
+    public TokenResponse login(LoginRequest request) {
         Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(request.getUsername(),request.getPassword()));
+                new UsernamePasswordAuthenticationToken(request.username(),request.password()));
         SecurityContextHolder.getContext().setAuthentication(authentication);
         return buildTokenResponse((UserDetails) authentication.getPrincipal());
     }
@@ -64,19 +70,19 @@ public class AuthService {
      * @param refreshTokenOld The previous refresh token to validate and replace
      * @return TokenResponse containing new tokens, or null if invalid token
      */
-    public TokenResponse refreshToken(String refreshTokenOld) {
+    public ApiResponse<TokenResponse> refreshToken(String refreshTokenOld) {
         // check key va xoa di key cu
         if(!authCache.existKeyRefresh(refreshTokenOld)){
-            return null;
+            return ApiResponse.error(ResponseCode.CACHE_REFRESH_TOKEN_NOT_FOUND.getCode(),ResponseCode.CACHE_REFRESH_TOKEN_NOT_FOUND.getEnMessage());
         }
 
         String username = authCache.extractUsernameFromRefresh(refreshTokenOld);
-        UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+        UserDetails userDetails = userService.loadUserByUsername(username);
         // Build new response and invalidate old token
         String jtiOld = authCache.extractJtiFromRefresh(refreshTokenOld);
         authCache.deleteRefresh(refreshTokenOld);
         authCache.deleteKeysJti(jtiOld);
-        return buildTokenResponse(userDetails);
+        return ApiResponse.success(buildTokenResponse(userDetails));
     }
     /**
      * Builds a complete token response including access/refresh tokens and metadata
@@ -108,12 +114,13 @@ public class AuthService {
         authCache.cacheRefreshToken(refreshToken, metadata, expirationRefresh);
         authCache.cacheJtiRevoke(jti,false,expirationAccess);
 
+        UserResponse userResponse = new UserResponse(null,username,null,null);
         return TokenResponse.builder()
                 .token_access(accessToken)
                 .token_refresh(refreshToken)
                 .accessTokenExpiry(expirationAccess)
                 .refreshTokenExpiry(expirationRefresh)
-                .user(UserDTO.builder().name(username).build())
+                .user(userResponse)
                 .build();
     }
     /**
@@ -124,18 +131,15 @@ public class AuthService {
      * @throws InvalidTokenException If the token is invalid, not found,
      *         or if there's a data access failure
      */
-    public void invalidateRefreshToken(String refreshToken) throws InvalidTokenException {
-        try {
+    public ApiResponse<?> invalidateRefreshToken(String refreshToken){
             String jti = authCache.extractJtiFromRefresh(refreshToken);
             if (!StringUtils.hasText(jti)) {
-                throw new InvalidTokenException("Refresh token not found");
+                return ApiResponse.error(ResponseCode.GET_ME_UNAUTHORIZED.getCode(), ResponseCode.GET_ME_UNAUTHORIZED.getEnMessage());
             }
 
             authCache.deleteRefresh(refreshToken);
             authCache.deleteKeysJti(jti);
-        } catch (DataAccessException ex){
-            throw new InvalidTokenException("Failed to invalidate token");
-        }
-
+            return ApiResponse.success(null);
     }
+
 }

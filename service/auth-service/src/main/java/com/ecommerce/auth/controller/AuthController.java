@@ -1,12 +1,12 @@
 package com.ecommerce.auth.controller;
-import com.ecommerce.auth.dto.*;
-import com.ecommerce.auth.dto.reponse.TokenResponse;
-import com.ecommerce.auth.exception.InvalidTokenException;
+import com.ecommerce.auth.dto.request.LoginRequest;
+import com.ecommerce.auth.dto.request.RegisterRequest;
+import com.ecommerce.auth.dto.request.VerifyEmailRequest;
+import com.ecommerce.auth.dto.response.TokenResponse;
 import com.ecommerce.auth.service.AuthService;
 import com.ecommerce.auth.service.OtpVerificationService;
+import com.ecommerce.shared_libs.response.ApiResponse;
 import com.ecommerce.shared_libs.util.CookieUtils;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
@@ -23,27 +23,37 @@ public class AuthController {
     private final AuthService authService;
     private final OtpVerificationService otpVerify;
 
-    @ExceptionHandler(ConstraintViolationException.class)
+
     @PostMapping("/register")
     public ResponseEntity<String> register(@RequestBody @Valid RegisterRequest request){
-        RegisterResult result = authService.register(request);
-        return switch (result.getStatus()){
-            case SUCCESS -> ResponseEntity.ok(result.getMessage());
-            case USERNAME_EXISTS, EMAIL_EXISTS ->
-                    ResponseEntity.status(HttpStatus.BAD_REQUEST).body(result.getMessage());
-            default -> ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Registration failed");
-        };
+        ApiResponse<?> response = authService.register(request);
+        if(!response.isSuccess()){
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response.getError().message());
+        }
+        return ResponseEntity.status(HttpStatus.CREATED).body(response.data().toString());
     }
 
-    @PostMapping("/verify-email")
+    @PostMapping("/send-verify-email")
+    public ResponseEntity<String> sendEmail(@RequestParam String email){
+        ApiResponse<Object> response = otpVerify.sendOtp(email);
+        if(!response.isSuccess()){
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response.getError().message());
+        }
+        return ResponseEntity.status(HttpStatus.OK).body("Verify OTP successfully");
+    }
+
+    @GetMapping("/verify-email")
     public ResponseEntity<String> verifyEmail(@RequestBody @Valid VerifyEmailRequest request){
-        otpVerify.verifyEmail(request);
+        ApiResponse<Object> response = otpVerify.verifyEmail(request);
+        if(!response.isSuccess()){
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response.getError().message());
+        }
         return ResponseEntity.status(HttpStatus.OK).body("Verify OTP successfully");
     }
 
     @PostMapping("/login")
-    public ResponseEntity<?> login(@RequestBody @Valid LoginRequest request, HttpServletRequest servletRequest){
-        TokenResponse tokenResponse = authService.login(request, servletRequest);
+    public ResponseEntity<?> login(@RequestBody @Valid LoginRequest request){
+        TokenResponse tokenResponse = authService.login(request);
         ResponseCookie accessCookie = CookieUtils.createHttpOnlyCookie("access_token", tokenResponse.getToken_access(), tokenResponse.getAccessTokenExpiry());
         ResponseCookie refreshCookie = CookieUtils.createHttpOnlyCookie("refresh_token", tokenResponse.getToken_refresh(), tokenResponse.getRefreshTokenExpiry());
         return ResponseEntity.ok()
@@ -61,23 +71,23 @@ public class AuthController {
      */
     @PostMapping("/refresh-token")
     public ResponseEntity<?> refreshToken(@CookieValue(name = "refresh_token", required = false) String refreshToken) {
-
         if (refreshToken == null || refreshToken.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(null);
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
-        TokenResponse response = authService.refreshToken(refreshToken);
-        if (response == null){
+        ApiResponse<TokenResponse> response = authService.refreshToken(refreshToken);
+        if (!response.isSuccess()){
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
         ResponseCookie accessCookie = CookieUtils.createHttpOnlyCookie(
-                "access_token", response.getToken_access(), response.getAccessTokenExpiry());
+                "access_token", response.data().getToken_access(), response.data().getAccessTokenExpiry());
         ResponseCookie refreshCookie = CookieUtils.createHttpOnlyCookie(
-                "refresh_token", response.getToken_refresh(), response.getRefreshTokenExpiry());
+                "refresh_token", response.data().getToken_refresh(), response.data().getRefreshTokenExpiry());
 
     return ResponseEntity.status(HttpStatus.CREATED)
             .header(HttpHeaders.SET_COOKIE,accessCookie.toString(),refreshCookie.toString())
-            .body(response.getUser());
+            .body(response.data().getUser());
     }
+
     /**
      * Handles user logout requests
      *
@@ -88,13 +98,15 @@ public class AuthController {
      *         - 500 Internal Server Error for system failures
      */
     @PostMapping("/logout")
-    public ResponseEntity<Void> logout(@CookieValue(name = "refresh_token", required = false) String refreshToken){
-        try {
+    public ResponseEntity<String> logout(@CookieValue(name = "refresh_token", required = false) String refreshToken){
             if (!StringUtils.hasText(refreshToken)) {
                 return ResponseEntity.badRequest().build();
             }
             // Invalidate the refresh token
-            authService.invalidateRefreshToken(refreshToken);
+            ApiResponse<?> response = authService.invalidateRefreshToken(refreshToken);
+            if(!response.isSuccess()){
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(response.getError().message());
+            }
 
             // Create cookie to clear the client-side token
             ResponseCookie clearCookie = CookieUtils.buildLogoutCookie();
@@ -102,13 +114,7 @@ public class AuthController {
                     .header(HttpHeaders.SET_COOKIE, clearCookie.toString())
                     .build();
 
-        } catch (InvalidTokenException ex) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception ex) {
-            return ResponseEntity.internalServerError().build();
-        }
     }
-
 
 }
 
