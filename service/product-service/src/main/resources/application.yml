@@ -1,0 +1,29 @@
+server:
+  port: 8084
+
+
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/product_service?useSSL=false&serverTimezone=UTC&characterEncoding=UTF-8
+    username: root
+    password: ""
+    # Không làm dừng ứng dụng khi không thể kết nối DB
+    continue-on-error: true
+  jpa:
+    show-sql: true
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+
+#security:
+#  oauth2:
+#    authorizationserver:
+#      issuer: http://localhost:9000 # khai báo issuer-uri, Spring Boot sẽ tự động Trích xuất jwks_uri từ metadata (ví dụ: http://localhost:9000/oauth2/jwks).
+
+
+
+
+#  config:
+#    import: optional:configserver:http://localhost:8888
