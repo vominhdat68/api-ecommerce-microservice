@@ -1,12 +1,13 @@
 package com.ecommerce.auth.controller;
 import com.ecommerce.auth.dto.request.LoginRequest;
 import com.ecommerce.auth.dto.request.RegisterRequest;
-import com.ecommerce.auth.dto.request.VerifyEmailRequest;
-import com.ecommerce.auth.dto.response.TokenResponse;
+import com.ecommerce.auth.dto.request.ResendOtpRequest;
+import com.ecommerce.auth.dto.request.VerifyOtpRequest;
+import com.ecommerce.auth.dto.response.LoginResponse;
 import com.ecommerce.auth.service.AuthService;
-import com.ecommerce.auth.service.OtpVerificationService;
-import com.ecommerce.shared_libs.response.ApiResponse;
-import com.ecommerce.shared_libs.util.CookieUtils;
+import com.ecommerce.user.response.ApiResponse;
+import com.ecommerce.user.util.CookieUtils;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
@@ -16,49 +17,64 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.concurrent.CompletableFuture;
+
 @RestController
 @RequestMapping("/api/v1/auth")
 @RequiredArgsConstructor
 public class AuthController {
     private final AuthService authService;
-    private final OtpVerificationService otpVerify;
-
 
     @PostMapping("/register")
-    public ResponseEntity<String> register(@RequestBody @Valid RegisterRequest request){
-        ApiResponse<?> response = authService.register(request);
+    public ResponseEntity<?> register(@RequestBody @Valid RegisterRequest request){
+        ApiResponse<Object> response = authService.register(request);
         if(!response.isSuccess()){
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response.getError().message());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response.message());
         }
         return ResponseEntity.status(HttpStatus.CREATED).body(response.data().toString());
     }
 
-    @PostMapping("/send-verify-email")
-    public ResponseEntity<String> sendEmail(@RequestParam String email){
-        ApiResponse<Object> response = otpVerify.sendOtp(email);
-        if(!response.isSuccess()){
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response.getError().message());
-        }
-        return ResponseEntity.status(HttpStatus.OK).body("Verify OTP successfully");
+    @PostMapping("/verify-otp")
+    public ResponseEntity<ApiResponse<Object>> verifyEmail(@RequestBody @Valid VerifyOtpRequest request) {
+        ApiResponse<Object> response = authService.verifyOtp(request);
+        HttpStatus status = response.isSuccess() ? HttpStatus.OK : HttpStatus.BAD_REQUEST;
+        return ResponseEntity.status(status).body(response);
     }
 
-    @GetMapping("/verify-email")
-    public ResponseEntity<String> verifyEmail(@RequestBody @Valid VerifyEmailRequest request){
-        ApiResponse<Object> response = otpVerify.verifyEmail(request);
-        if(!response.isSuccess()){
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response.getError().message());
-        }
-        return ResponseEntity.status(HttpStatus.OK).body("Verify OTP successfully");
-    }
+    @GetMapping("/resend-otp")
+    public ResponseEntity<ApiResponse<Object>> resendOtp(@RequestBody @Valid ResendOtpRequest request) {
+    return ResponseEntity.ok(authService.resendOtp(request));
+}
 
     @PostMapping("/login")
-    public ResponseEntity<?> login(@RequestBody @Valid LoginRequest request){
-        TokenResponse tokenResponse = authService.login(request);
-        ResponseCookie accessCookie = CookieUtils.createHttpOnlyCookie("access_token", tokenResponse.getToken_access(), tokenResponse.getAccessTokenExpiry());
-        ResponseCookie refreshCookie = CookieUtils.createHttpOnlyCookie("refresh_token", tokenResponse.getToken_refresh(), tokenResponse.getRefreshTokenExpiry());
-        return ResponseEntity.ok()
-                .header(HttpHeaders.SET_COOKIE, accessCookie.toString(), refreshCookie.toString())
-                .body(tokenResponse.getUser());
+    public CompletableFuture<ResponseEntity<ApiResponse<?>>> login(@RequestBody @Valid LoginRequest loginRequest, HttpServletRequest httpRequest) {
+        String clientIp = httpRequest.getRemoteAddr();
+        return authService.login(loginRequest,clientIp)
+                .thenApply(apiResponse  -> {
+                    if(!apiResponse.isSuccess()){
+                        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                                .body(apiResponse);
+                    }
+
+                    LoginResponse loginResponse = (LoginResponse) apiResponse.data();
+                    // 1. Tạo HTTP-only cookies
+                    ResponseCookie accessCookie = CookieUtils.createHttpOnlyCookie(
+                            "access_token",
+                            loginResponse.getToken_access(),
+                            loginResponse.getAccessTokenExpiry()
+                    );
+
+                    ResponseCookie refreshCookie = CookieUtils.createHttpOnlyCookie(
+                            "refresh_token",
+                            loginResponse.getToken_refresh(),
+                            loginResponse.getRefreshTokenExpiry()
+                    );
+
+                    // 3. Trả về response thành công (không chứa token trong body)
+                    return ResponseEntity.ok()
+                            .header(HttpHeaders.SET_COOKIE,accessCookie.toString(),refreshCookie.toString())
+                            .body(ApiResponse.success(loginResponse.getUser()));
+                });
     }
 
     /**
@@ -74,7 +90,7 @@ public class AuthController {
         if (refreshToken == null || refreshToken.isEmpty()) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
-        ApiResponse<TokenResponse> response = authService.refreshToken(refreshToken);
+        ApiResponse<LoginResponse> response = authService.refreshToken(refreshToken);
         if (!response.isSuccess()){
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
@@ -105,7 +121,7 @@ public class AuthController {
             // Invalidate the refresh token
             ApiResponse<?> response = authService.invalidateRefreshToken(refreshToken);
             if(!response.isSuccess()){
-                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(response.getError().message());
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(response.message());
             }
 
             // Create cookie to clear the client-side token

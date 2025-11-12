@@ -1,0 +1,50 @@
+server:
+  port: 9000
+
+spring:
+  application:
+     name: auth-service
+  datasource:
+    url: jdbc:mysql://localhost:3306/auth_service?useSSL=false&serverTimezone=UTC&characterEncoding=UTF-8
+    username: root
+    password: ""
+    # Không làm dừng ứng dụng khi không thể kết nối DB
+    continue-on-error: true
+  jpa:
+    show-sql: true
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+
+  # email
+  mail:
+    host: smtp.gmail.com  # SMTP server c?a nhà cung c?p email
+    port: 587                           # C?ng k?t n?i SMTP (th??ng dùng 587 ho?c 465)
+    username: sgfdainesend@gmail.com     # Email dùng ?? g?i
+    password: kunm pvfy jpkn einr       # M?t kh?u email (ho?c app password n?u dùng 2FA)
+    properties:
+      mail:
+        smtp:
+          auth: true                    # Yêu c?u xác th?c khi g?i email
+          starttls:
+            enable: true         # Kích ho?t mã hóa TLS (b?o m?t)
+          ssl:
+            trust: smtp.gmail.com  # Tin t??ng SSL certificate c?a host
+    test-connection: true               # Ki?m tra k?t n?i khi kh?i ??ng ?ng d?ng
+
+
+# File: auth-service/src/main/resources/application.yml
+jwt:
+  claims:
+    iss: http://localhost:9000  # Issuer
+    aud: api-gateway               # Audience
+    custom-claims:
+      roles-claim: "auth_roles"    # Tùy chỉnh tên claim roles
+      scopes-claim: "scope"       # Tùy chỉnh tên claim scopes
+
+
+#  config:
+#    import: optional:configserver:http://localhost:8888
+

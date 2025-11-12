@@ -2,67 +2,93 @@ package com.ecommerce.auth.service;
 
 import com.ecommerce.auth.cache.AuthCache;
 import com.ecommerce.auth.cache.metadata.RefreshTokenMetadata;
-import com.ecommerce.auth.dto.request.LoginRequest;
-import com.ecommerce.auth.dto.request.RegisterRequest;
-import com.ecommerce.auth.dto.request.UserResponse;
-import com.ecommerce.auth.dto.response.TokenResponse;
+import com.ecommerce.auth.dto.request.*;
+import com.ecommerce.auth.dto.response.LoginResponse;
 import com.ecommerce.auth.entity.User;
 import com.ecommerce.auth.exception.InvalidTokenException;
 import com.ecommerce.auth.config.security.JwtProvider;
-import com.ecommerce.shared_libs.cache.Redis.OTPCache;
-import com.ecommerce.shared_libs.cache.Redis.RedisKeys;
-import com.ecommerce.shared_libs.response.ApiResponse;
-import com.ecommerce.shared_libs.response.ResponseCode;
+import com.ecommerce.user.cache.Redis.RedisKeys;
+import com.ecommerce.user.response.ApiResponse;
+import com.ecommerce.user.response.ResponseCode;
+import com.ecommerce.user.util.OTPUtil;
 import lombok.RequiredArgsConstructor;
-import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
-
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 
 @Service
 @RequiredArgsConstructor
 public class AuthService {
     private final UserService userService;
-    private final PasswordEncoder passwordEncoder;
-    private final AuthenticationManager authenticationManager;
     private final JwtProvider jwtProvider;
     private final AuthCache authCache;
-    private final OTPCache otpCache;
-    private static final int MAX_REFRESH_TOKENS = 5;
+    private final OtpService otpService;
+    private final TransactionTemplate transactionTemplate;
 
-    public ApiResponse<?> register(RegisterRequest request) {
-        if(userService.existsByUsername(request.username())){
-            return ApiResponse.error(ResponseCode.REGISTER_USERNAME_EXISTS.getCode(),ResponseCode.REGISTER_USERNAME_EXISTS.getEnMessage());
-        }
-        if(userService.exitsByEmail(request.email())){
-            return ApiResponse.error(ResponseCode.REGISTER_EMAIL_EXISTS.getCode(),ResponseCode.REGISTER_EMAIL_EXISTS.getEnMessage());
-        }
-        User user = new User();
-        user.setUsername(request.username());
-        user.setEmail(request.email());
-        user.setPassword(passwordEncoder.encode(request.password()));
-        user.setEnabled(false);
-        userService.saveUser(user);
-        //cache email verify OTP
-        otpCache.cacheRegisteredEmail(request.email());
+    public ApiResponse<Object> register(RegisterRequest request) {
+        String email = request.email();
+        try {
+            if (!authCache.acquireLock(email)) {
+                return ApiResponse.error(ResponseCode.EMAIL_IS_IN_USE.getCode(),ResponseCode.EMAIL_IS_IN_USE.getEnMessage());
+            }
+            // Kiểm tra email tài khoản đang đăng ký có đang trong quá trình chờ xác thực ko?
+            if (authCache.isAlreadyProcessing(email)) {
+                return ApiResponse.error(ResponseCode.EMAIL_IS_IN_USE.getCode(),ResponseCode.EMAIL_IS_IN_USE.getEnMessage());
+            }
+        return  transactionTemplate.execute(status -> {
 
-    return ApiResponse.success(ResponseCode.REGISTER_SUCCESS.getEnMessage());
+            //  Kiểm tra email tài khoản đang trong đăng ký
+            if (userService.existsByUsername(email)) {
+                return ApiResponse.error(ResponseCode.REGISTER_EMAIL_EXISTS.getCode(),ResponseCode.REGISTER_EMAIL_EXISTS.getEnMessage());
+            }
+
+            String otp = OTPUtil.generateSecureOtp();
+            User pendingUser = userService.createPendingUser(request);
+            authCache.cacheRegistrationData(email, otp, pendingUser);//cache otp để kiểm tra khi người dùng verify
+
+            // Gửi OTP bất đồng bộ
+            otpService.sendOtpEmailRegisterAsync(email, otp);
+
+        return ApiResponse.success(ResponseCode.OTP_CHECK_EMAIL.getEnMessage());
+        });
+        } finally {
+            authCache.releaseLock(email);
+        }
     }
 
 
-    public TokenResponse login(LoginRequest request) {
-        Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(request.username(),request.password()));
-        SecurityContextHolder.getContext().setAuthentication(authentication);
-        return buildTokenResponse((UserDetails) authentication.getPrincipal());
+
+
+    public CompletableFuture<ApiResponse<?>> login(LoginRequest request, String clientIp) {
+        //1. check verify với spring security quá trình này auto
+        //...code....
+        //2. Kiểm tra nếu tài khoản đang bị lock tạm thời -> đăng nhập sai quá nhiều
+        if (authCache.isAccountLocked(request.username(), clientIp)) {
+            return CompletableFuture.completedFuture(
+                    ApiResponse.error(ResponseCode.ACCOUNT_LOCKED.getCode(), ResponseCode.ACCOUNT_LOCKED.getEnMessage())
+            );
+        }
+
+        // 3. Xử lý bất đồng bộ các tác vụ tốn thời gian
+        return CompletableFuture.supplyAsync(() -> {
+            // 3.1. Kiểm tra user trong DB
+            User user = userService.findByUsername(request.username());
+            if (user == null || !userService.validPassword(request.password(), user.getPassword())) {
+//      3.Rate limiting
+                authCache.recordFailedLogin(request.username(), clientIp); // Tracking failed attempts
+                return ApiResponse.error(ResponseCode.LOGIN_NOT_FOUND_ACCOUNT.getCode(),
+                        ResponseCode.LOGIN_NOT_FOUND_ACCOUNT.getEnMessage());
+            }
+
+            return ApiResponse.success(buildTokenResponse(user));
+        });
     }
+
+
     /**
      * Refreshes authentication tokens by validating the old refresh token,
      * invalidating it, and generating new access/refresh tokens.
@@ -70,7 +96,7 @@ public class AuthService {
      * @param refreshTokenOld The previous refresh token to validate and replace
      * @return TokenResponse containing new tokens, or null if invalid token
      */
-    public ApiResponse<TokenResponse> refreshToken(String refreshTokenOld) {
+    public ApiResponse<LoginResponse> refreshToken(String refreshTokenOld) {
         // check key va xoa di key cu
         if(!authCache.existKeyRefresh(refreshTokenOld)){
             return ApiResponse.error(ResponseCode.CACHE_REFRESH_TOKEN_NOT_FOUND.getCode(),ResponseCode.CACHE_REFRESH_TOKEN_NOT_FOUND.getEnMessage());
@@ -84,6 +110,7 @@ public class AuthService {
         authCache.deleteKeysJti(jtiOld);
         return ApiResponse.success(buildTokenResponse(userDetails));
     }
+
     /**
      * Builds a complete token response including access/refresh tokens and metadata
      *
@@ -94,7 +121,7 @@ public class AuthService {
      *         - User information
      *         - Cache entries for token management
      */
-    private TokenResponse buildTokenResponse(UserDetails userDetails) {
+    private LoginResponse buildTokenResponse(UserDetails userDetails) {
         String username = userDetails.getUsername();
         String jti = UUID.randomUUID().toString();
         // Generate tokens
@@ -114,8 +141,8 @@ public class AuthService {
         authCache.cacheRefreshToken(refreshToken, metadata, expirationRefresh);
         authCache.cacheJtiRevoke(jti,false,expirationAccess);
 
-        UserResponse userResponse = new UserResponse(null,username,null,null);
-        return TokenResponse.builder()
+        UserResponse userResponse = new UserResponse(username,username,null);
+        return LoginResponse.builder()
                 .token_access(accessToken)
                 .token_refresh(refreshToken)
                 .accessTokenExpiry(expirationAccess)
@@ -123,6 +150,7 @@ public class AuthService {
                 .user(userResponse)
                 .build();
     }
+
     /**
      * Invalidates a refresh token by removing it from the cache storage
      * and cleaning up associated JWT keys.
@@ -137,9 +165,45 @@ public class AuthService {
                 return ApiResponse.error(ResponseCode.GET_ME_UNAUTHORIZED.getCode(), ResponseCode.GET_ME_UNAUTHORIZED.getEnMessage());
             }
 
-            authCache.deleteRefresh(refreshToken);
-            authCache.deleteKeysJti(jti);
+            authCache.deleteRefresh(refreshToken);//xóa bỏ refresh token
+            authCache.deleteKeysJti(jti);// block phiên đăng nhập
             return ApiResponse.success(null);
     }
+/***
+ * Kiem tra OTP tu client phan hoi
+ *
+ *
+ */
+    public ApiResponse<Object> verifyOtp(VerifyOtpRequest request) {
+        String cachedOtp = authCache.getAndDeleteOtp(request.email());
+        if (!authCache.isValidOtp(cachedOtp, request.otp())) {
+            return ApiResponse.error(ResponseCode.OTP_VERIFICATION_FAILED.getCode(),ResponseCode.OTP_VERIFICATION_FAILED.getEnMessage());
+        }
 
+        // 2. Atomic lấy và xóa user data
+        User user = authCache.getAndDeletePendingUser(request.email());
+        if (user == null) {
+            return ApiResponse.error(ResponseCode.OTP_EXPIRED.getCode(), ResponseCode.OTP_SUCCESS.getEnMessage());
+        }
+
+        if (!user.isEnabled()) {
+            user.setEnabled(true);
+            userService.saveUser(user);
+        }
+        // Clear OTP
+        return ApiResponse.success(ResponseCode.OTP_SUCCESS.getEnMessage());
+    }
+
+    public ApiResponse<Object> resendOtp(ResendOtpRequest request) {
+
+        int retryCount = authCache.getCurrentRetryCount(request.email());
+        if (retryCount >= RedisKeys.MAX_RETRY) {
+            return ApiResponse.error(ResponseCode.OTP_OVER_LIMIT.getCode(),ResponseCode.OTP_OVER_LIMIT.getEnMessage());
+        }
+        String newOtp = OTPUtil.generateSecureOtp();
+        authCache.saveOtpAndUpdateRetryCount(request.email(), newOtp);
+        otpService.sendOtpVerifyForgotPass(request.email(),newOtp);
+        return ApiResponse.success(null);
+
+    }
 }

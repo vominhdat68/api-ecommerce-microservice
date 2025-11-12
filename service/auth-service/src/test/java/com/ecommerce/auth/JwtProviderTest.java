@@ -1,6 +1,6 @@
 package com.ecommerce.auth;
 
-import com.ecommerce.auth.security.JwtProvider;
+import com.ecommerce.auth.config.security.JwtProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InjectMocks;
