@@ -39,7 +39,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Token has been expired");
             return;
         }
-        //🔒One-Time Token (Chống replay attack)
+        //One-Time Token (Chống replay attack)
         String jti = jwtProvider.extractJtiToken(token);
         if (StringUtils.hasText(token) && !authCache.existKeyJti(jti)) {
             System.err.println("JwtAuthenticationFilter>>>>>>>>>>> Token đã bị thu hồi");
@@ -58,7 +58,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                         userDetails,null,userDetails.getAuthorities()
                 );
                 authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-                // 🔒Set Authentication
+                //Set Authentication
                 SecurityContextHolder.getContext().setAuthentication(authToken);
             }
         }
